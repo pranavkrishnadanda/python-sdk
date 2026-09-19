@@ -8,6 +8,7 @@ the public client never exposes.
 
 import base64
 import json
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any
 
@@ -968,3 +969,38 @@ Redirect to http://backend.lan:8000/mcp/ not followed: it would downgrade this H
 The server is likely behind a TLS-terminating proxy whose forwarded headers it does not trust,
 often combined with a trailing-slash difference. Try https://backend.lan:8000/mcp/ instead, or fix the proxy settings.\
 """)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_log"),
+    [
+        (200, None),
+        (202, None),
+        (204, None),
+        (405, "Server does not allow session termination"),
+        (500, "Session termination failed: 500"),
+    ],
+)
+@pytest.mark.anyio
+async def test_terminate_session_treats_2xx_delete_responses_as_success_including_202(
+    status_code: int,
+    expected_log: str | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Session termination accepts any 2xx DELETE response as success; 202 Accepted is spec-compliant
+    for an asynchronous delete and must not produce a warning."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(status_code)
+
+    caplog.set_level(logging.DEBUG, logger="mcp.client.streamable_http")
+    transport = StreamableHTTPTransport("http://test/mcp")
+    transport.session_id = "test-session-id"
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as http:
+        await transport.terminate_session(http)
+
+    if expected_log is not None:
+        assert any(expected_log in record.message for record in caplog.records)
+    else:
+        assert not any("Session termination failed" in record.message for record in caplog.records)
